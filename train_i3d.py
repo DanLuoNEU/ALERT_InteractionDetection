@@ -18,37 +18,33 @@ from torchvision import datasets, transforms
 
 import videotransforms
 from networks.pytorch_i3d import InceptionI3d
-from datasets.charades_dataset import Charades as Dataset
 ########## IMPORT END ##########
 
 ########## ARGUMENT PARSER ##########
 parser = argparse.ArgumentParser()
 parser.add_argument('-gpu', type=str, help=" GPU id to train")
 parser.add_argument('-mode', type=str, help="rgb, flow, two")
-parser.add_argument('-root', type=str, help="/path/to/dataset")
+parser.add_argument('-root', type=str, default='/data/truppr/AVA/', help="/path/to/dataset")
 parser.add_argument('-save_model', type=str, help="/path/to/save_model")
+
 
 args = parser.parse_args()
 ########## ARGUMENT PARSER END ##########
 
 ########## CONFIGURATION ##########
-os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"   
-os.environ["CUDA_VISIBLE_DEVICES"]=f'{args.gpu}'
+gpu = torch.device(f"cuda:{args.gpu}")
 
 ########## CONFIGURATION END ##########
 
 ########## ARGUMENT PARSER ##########
-def run(init_lr=0.1, max_steps=64e3, mode='rgb', root='/ssd/Charades_v1_rgb', train_split='charades/charades.json', batch_size=8*5, save_model=''):
+# TODO: change the root and train_split
+def run(init_lr=0.1, max_steps=64e3, mode='rgb', root='', train_split='', batch_size=8*5, save_model=''):
     # setup dataset
-    train_transforms = transforms.Compose([videotransforms.RandomCrop(224),
-                                           videotransforms.RandomHorizontalFlip(),
-    ])
-    test_transforms = transforms.Compose([videotransforms.CenterCrop(224)])
 
-    dataset = Dataset(train_split, 'training', root, mode, train_transforms)
+    dataset = Dataset(train_split, 'train', root, mode, train_transforms)
     dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=36, pin_memory=True)
 
-    val_dataset = Dataset(train_split, 'testing', root, mode, test_transforms)
+    val_dataset = Dataset(train_split, 'test', root, mode, test_transforms)
     val_dataloader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size, shuffle=True, num_workers=36, pin_memory=True)    
 
     dataloaders = {'train': dataloader, 'val': val_dataloader}
@@ -62,9 +58,9 @@ def run(init_lr=0.1, max_steps=64e3, mode='rgb', root='/ssd/Charades_v1_rgb', tr
     else:
         i3d = InceptionI3d(400, in_channels=3)
         i3d.load_state_dict(torch.load('models/rgb_imagenet.pt'))
+    # TODO: change the class number we need
     i3d.replace_logits(157)
-    #i3d.load_state_dict(torch.load('/ssd/models/000920.pt'))
-    i3d.cuda()
+    i3d.cuda(device=gpu)
     i3d = nn.DataParallel(i3d)
 
     lr = init_lr
@@ -99,9 +95,9 @@ def run(init_lr=0.1, max_steps=64e3, mode='rgb', root='/ssd/Charades_v1_rgb', tr
                 inputs, labels = data
 
                 # wrap them in Variable
-                inputs = Variable(inputs.cuda())
+                inputs = Variable(inputs.cuda(device=gpu))
                 t = inputs.size(2)
-                labels = Variable(labels.cuda())
+                labels = Variable(labels.cuda(device=gpu))
 
                 per_frame_logits = i3d(inputs)
                 # upsample to input size
