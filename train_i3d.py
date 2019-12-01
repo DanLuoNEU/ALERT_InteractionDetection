@@ -26,12 +26,12 @@ from networks.pytorch_i3d import InceptionI3d
 parser = argparse.ArgumentParser()
 parser.add_argument('-gpu', type=str, default='3', help=" GPU id to train")
 parser.add_argument('-batch_size', type=int, default=4, help=" batch_size")
-parser.add_argument('-num_workers', type=int, default=0, help=" dataset parallel")
-parser.add_argument('-max_steps', type=int, default=64e3, help="Max steps for the training")
+parser.add_argument('-num_workers', type=int, default=4, help=" dataset parallel")
+parser.add_argument('-max_steps', type=int, default=64e1, help="Max steps for the training")
 parser.add_argument('-mode', type=str, default='rgb', help="rgb, flow, pose, two, three")
 parser.add_argument('-data_root', type=str, default='/data/truppr/AVA/', help="/path/to/dataset")
 parser.add_argument('-save_dir', type=str, default='exp/', help="/path/to/save_model")
-parser.add_argument('-save_int', type=int, default=10, help="Itervals for saving model")
+parser.add_argument('-save_int', type=int, default=20, help="Itervals for saving model")
 
 args = parser.parse_args()
 ########## ARGUMENT PARSER END ##########
@@ -39,8 +39,9 @@ args = parser.parse_args()
 ########## CONFIGURATION ##########
 gpu = torch.device(f"cuda:{args.gpu}")
 
-init_lr = 0.1
-num_steps_per_update = 4*5 # accum gradient
+init_lr = 0.01
+alpha, beta = 0.5, 0.5
+num_steps_per_update = 4 # accum gradient
 ########## CONFIGURATION END ##########
 
 def train(model,optimizer,lr_sched,train_DL,steps):
@@ -53,8 +54,11 @@ def train(model,optimizer,lr_sched,train_DL,steps):
     tot_cls_loss = 0.0
     num_iter = 0
     optimizer.zero_grad()
+
+    start =time.time()
     # Iterate over data.
     for inputs, labels in train_DL:
+        # print(num_iter)
         num_iter += 1
         # Wrap inputs and labels in Variable
         # inputs, labels = data
@@ -73,32 +77,35 @@ def train(model,optimizer,lr_sched,train_DL,steps):
         cls_loss = F.binary_cross_entropy_with_logits(torch.max(per_frame_logits, dim=2)[0], torch.max(labels, dim=2)[0])
         tot_cls_loss += cls_loss.item()
         # Combine loss
-        loss = (0.5*loc_loss + 0.5*cls_loss)/num_steps_per_update
+        loss = (alpha*loc_loss + beta*cls_loss)
         tot_loss += loss.item()
         
         loss.backward()
 
         if num_iter == num_steps_per_update:
             steps += 1
+            # print(steps)
             num_iter = 0
             optimizer.step()
             optimizer.zero_grad()
             lr_sched.step()
-            # unit of step => batch_size*num_steps_per_update = 32 samples
+            # unit of step => batch_size*num_steps_per_update = 16 samples
             # save_int = unit of step*args.save_int = 320 samples
             if steps % args.save_int == 0:
-                print(f'Train| Loc Loss: {tot_loc_loss/(args.save_int*num_steps_per_update):.4f}| Cls Loss: {tot_cls_loss/(args.save_int*num_steps_per_update):.4f}| Tot Loss: {tot_loss/args.save_int:.4f}')
+                unit = args.save_int*num_steps_per_update
+                print(f'Train| Loc Loss: {tot_loc_loss/unit:.4f}| Cls Loss: {tot_cls_loss/unit:.4f}| Tot Loss: {tot_loss/unit:.4f}|{(time.time()-start):.0f} s')
                 # save model
                 save_path = args.save_dir+args.mode
                 if not os.path.exists(save_path):
                     os.mkdir(save_path)
-                save_name = save_path+'/'+args.mode+str(steps).zfill(6)+'.pt'
-                torch.save(model.module.state_dict(), save_name)
+                save_name = save_path+'/'+args.mode+str(steps).zfill(6)+'.pth'
+                torch.save(model.state_dict(), save_name)
                 tot_loss = tot_loc_loss = tot_cls_loss = 0.
+    
     return steps
 
 
-def eval(model,optimizer,val_DL,steps):
+def eval(model,optimizer,val_DL):
     """ Validation step
     """
     model.eval()
@@ -109,6 +116,7 @@ def eval(model,optimizer,val_DL,steps):
     num_iter = 0
     optimizer.zero_grad()
             
+    start = time.time()
     # Iterate over data.
     for inputs, labels in val_DL:
         num_iter += 1
@@ -128,10 +136,10 @@ def eval(model,optimizer,val_DL,steps):
         cls_loss = F.binary_cross_entropy_with_logits(torch.max(per_frame_logits, dim=2)[0], torch.max(labels, dim=2)[0])
         tot_cls_loss += cls_loss.item()
         # loss per update
-        loss = (0.5*loc_loss + 0.5*cls_loss)/num_steps_per_update
-        tot_loss += loss.data[0]
+        loss = alpha*loc_loss + beta*cls_loss
+        tot_loss += loss.item()
 
-    print(f'Val| Loc Loss: {tot_loc_loss/num_iter:.4f}| Cls Loss: {tot_cls_loss/num_iter:.4f}| Tot Loss: {(tot_loss*num_steps_per_update)/num_iter:.4f}')
+    print(f'Val| Loc Loss: {tot_loc_loss/num_iter:.4f}| Cls Loss: {tot_cls_loss/num_iter:.4f}| Tot Loss: {tot_loss/num_iter:.4f}|{(time.time()-start):.0f} s')
 
 
 def main():
@@ -140,7 +148,7 @@ def main():
     dataset = ava_dataset(root_path=args.data_root, split='train', mode=args.mode, seq_len=64)
     dataloader = tud.DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True)
     val_dataset = ava_dataset(root_path=args.data_root, split='valid', mode=args.mode, seq_len=64)
-    val_dataloader = tud.DataLoader(val_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True)    
+    val_dataloader = tud.DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=args.num_workers, pin_memory=True)    
 
     dataloaders = {'train': dataloader, 'val': val_dataloader}
     datasets = {'train': dataset, 'val': val_dataset}
@@ -164,14 +172,11 @@ def main():
     steps = 0
     # train it
     while steps < args.max_steps:#for epoch in range(num_epochs):
-        start = time.time()
         print(f'Step {steps}/{int(args.max_steps)}')
 
         steps = train(i3d, optimizer, lr_sched, dataloaders['train'], steps)
         # eval interval=> unit of step*args.save_int = 320 samples
-        if steps % args.save_int == 0:
-            eval(i3d, optimizer, dataloaders['val'], steps)
-        print(f"{(time.time()-start)//60:.0f} min")
+        eval(i3d, optimizer, dataloaders['val'])
 
 if __name__ == '__main__':
     main()
