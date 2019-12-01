@@ -117,8 +117,12 @@ class ava_dataset(tud.Dataset):
             """
             w,h,c = img.shape
             ######
-            if w < 226 or h < 226:
-                d = 226.-min(w,h)
+            # if w < 226 or h < 226:
+            #     d = 226.-min(w,h)
+            #     sc = 1+d/min(w,h)
+            #     img = cv2.resize(img,dsize=(0,0),fx=sc,fy=sc)
+            if w < 224 or h < 224:
+                d = 224.-min(w,h)
                 sc = 1+d/min(w,h)
                 img = cv2.resize(img,dsize=(0,0),fx=sc,fy=sc)
             #######
