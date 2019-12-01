@@ -41,8 +41,13 @@ class ava_dataset(tud.Dataset):
         ''' new action_id for customed actions from AVA 
         # 0 -> 36, "push"   # 122(person) + 56(object)
         # 1 -> 46, "pickup" # 452 samples
+        # 2 -> 11, "sit"
+        # 3 -> 12, "stand"
+        # 4 -> 47, "put down"
+        # 5 -> 65, "give"
+        # 6 -> 78, "take"
         '''
-        self.actions = ["36", "46"]
+        self.actions = ["36", "46", "11", "12", "47", "65", "78"]
         self.num_classes = len(self.actions)
 
         self.root = root_path
@@ -67,7 +72,7 @@ class ava_dataset(tud.Dataset):
         # CSV data: num_samples long list, 
         #           [vedio_id,middle_frame_timestamp,x0,y0,x1,y1,action_id,person_id], 
         #           person_box is normalized wrt frame size
-        split_file = f"{self.root}/annotations/ava_random_{self.split}_truppr_v2class.csv"
+        split_file = f"{self.root}/annotations/ava_random_{self.split}_truppr_v7class.csv"
         with open(split_file, 'r') as f:
             data = list(csv.reader(f))
 
