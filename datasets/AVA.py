@@ -5,12 +5,12 @@ import os
 from os import listdir
 from os.path import isfile, join
 
+import sys
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(f"{ROOT_DIR}, '../utils'))
+sys.path.append(f"{ROOT_DIR}/../utils")
 
 import csv
 import cv2
-import sys
 import json
 import time
 import pickle
@@ -21,127 +21,143 @@ import torch
 import torch.utils.data as tud
 import torchvision.transforms as transforms
 
-
+import videotransforms
 ########## IMPORT END ##########
-def load_rgb_frames(image_dir, vid, start, num=64):
-    """ Load Cropped RGB images from the image_dir
-    !!! Suppose the rgb files have been preprocessed to 224 x 224 !!! 
-    """
-    frames = []
-
-    for i in range(start, start+num):
-        # Read RGB image
-        # TODO: change the path to rgb files
-        img = cv2.imread('/path/to/images')[:, :, [2, 1, 0]] # BGR->RGB
-        w,h,c = img.shape
-        ######
-        if w < 226 or h < 226:
-            d = 226.-min(w,h)
-            sc = 1+d/min(w,h)
-            img = cv2.resize(img,dsize=(0,0),fx=sc,fy=sc)
-        #######
-        img = (img/255.)*2 - 1
-        
-        frames.append(img)
-
-    return np.asarray(frames, dtype=np.float32)
-
-def load_flow_frames(image_dir, vid, start, num):
-    """ Load optical flow files from image_dir
-    !!! Suppose the optical flow files are cropped to 224 x 224 !!!
-    """
-    frames = []
-    for i in range(start, start+num):
-        # TODO: change the path to the optical flow files
-        with open('/path/to/optical_flow_file', 'rb') as f:
-            of = pickle.load(f)
-    
-        c,w,h = of.shape
-        
-        imgx = of[0,:,:]
-        imgy = of[1,:,:] 
-        # TODO: the optical flow files need to be cropped and then resized
-        if w < 224 or h < 224:
-            d = 224.-min(w,h)
-            sc = 1+d/min(w,h)
-            imgx = cv2.resize(imgx,dsize=(0,0),fx=sc,fy=sc)
-            imgy = cv2.resize(imgy,dsize=(0,0),fx=sc,fy=sc)
-        
-        imgx = (imgx/255.)*2 - 1
-        imgy = (imgy/255.)*2 - 1
-        img = np.asarray([imgx, imgy]).transpose([1,2,0])
-
-        frames.append(img)
-    
-        return np.asarray(frames, dtype=np.float32)
-
-
-def make_dataset(split_file, split, root, mode, num_classes=2):
-    """ Use the split_file to read all annotations we need
-    """
-    dataset = []
-    with open(split_file, 'r') as f:
-        data = json.load(f)
-
-    i = 0
-    for vid in data.keys():
-        if data[vid]['subset'] != split:
-            continue
-
-        if not os.path.exists(os.path.join(root, vid)):
-            continue
-        num_frames = len(os.listdir(os.path.join(root, vid)))
-        if mode == 'flow':
-            num_frames = num_frames//2
-            
-        if num_frames < 66:
-            continue
-
-        label = np.zeros((num_classes,num_frames), np.float32)
-
-        fps = num_frames/data[vid]['duration']
-        for ann in data[vid]['actions']:
-            for fr in range(0,num_frames,1):
-                if fr/fps > ann[1] and fr/fps < ann[2]:
-                    label[ann[0], fr] = 1 # binary classification
-        dataset.append((vid, label, data[vid]['duration'], num_frames))
-        i += 1
-    
-    return dataset
-
-
-def actions(act):
-    if act == "46":   return "push" # 122(person) + 56(object)
-    elif act == "36": return "pickup" # 452 samples
 
 
 class ava_dataset(tud.Dataset):
     """ Dataset of customed AVA dataset
     
     """
-    
-    def __init__(self, root_path, split, seq_len=64, mode):
+    def __init__(self, root_path='/data/truppr/AVA', split='train', mode='rgb', seq_len=64):
         """ Dataset Initialization
 
         Arguments:
             root_path: /path/to/dataset_root
-            split: 'train', 'valid'
-            seq_len: T >=65
+            split: 'train', 'valid', 'test'
+            mode: input stream type
+            seq_len: T 
         """
-        # TODO: 
-        self.samples = make_dataset(split, root_path, mode)
-        self.mode = mode
-        self.root = root
-        self.seq_len = seq_len
+        ''' new action_id for customed actions from AVA 
+        # 0 -> 36, "push"   # 122(person) + 56(object)
+        # 1 -> 46, "pickup" # 452 samples
+        '''
+        self.actions = ["36", "46"]
+        self.num_classes = len(self.actions)
 
+        self.root = root_path
+        self.split = split
+        self.mode = mode
+        self.seq_len = seq_len
+        self.make_dataset()
+        # Build up the transform for Data Augmentation
         if split == 'train':
             self.transform = transforms.Compose([videotransforms.RandomCrop(224),
                                            videotransforms.RandomHorizontalFlip()])
-        elif split == 'valid' or split = 'test':
+        elif split == 'valid' or split == 'test':
             self.transform = transforms.Compose([videotransforms.RandomCrop(224)])
                                 
+        print(f">====== AVA {split}({len(self.dataset)}) Samples Loaded! ======<")
+
+
+    def make_dataset(self):
+        """ Use the split_file to read all annotations we need
+        """
+        dataset = []
+        # CSV data: num_samples long list, 
+        #           [vedio_id,middle_frame_timestamp,x0,y0,x1,y1,action_id,person_id], 
+        #           person_box is normalized wrt frame size
+        split_file = f"{self.root}/annotations/ava_random_{self.split}_truppr_v2class.csv"
+        with open(split_file, 'r') as f:
+            data = list(csv.reader(f))
+
+        for vid in data:
+            vid_path = f"{self.root}/streams/{vid[0]}_{vid[1]}_{vid[6]}_{vid[7]}"
+            if not os.path.exists(vid_path):
+                continue
+            num_frames = len(os.listdir(vid_path+f'/{self.mode}'))
+            if self.mode == 'flow':
+                num_frames = num_frames-1
+            # Action Length is at least 66
+            if num_frames < 66:
+                print(vid[0], vid[1], "is NOT long enough!!! ")
+                continue
+
+            label = np.zeros((self.num_classes, num_frames), np.float32)
+            ''' # Normal way to deal with the data, 0 and 1 for the same action
+            fps = num_frames/data[vid]['duration']
+            for ann in data[vid]['actions']:
+                for fr in range(0,num_frames,1):
+                    if fr/fps > ann[1] and fr/fps < ann[2]:
+                        label[ann[0], fr] = 1 # binary classification
+            '''
+            label[self.actions.index(vid[6]), :] = 1
+
+            dataset.append((vid, label, num_frames))
+    
+        self.dataset = dataset
+
+
+    def load_rgb_frames(self, image_dir, vid, start, num=64):
+        """ Load Cropped RGB images from the image_dir
+        !!! Suppose the rgb files have been preprocessed to 224 x 224 !!! 
+        rgb directory in form of '0000001.jpg', starts from 1
+        """
+        frames = []
+
+        for i in range(start+1, start+num+1):
+            # Read RGB image
+            img = cv2.imread(image_dir+"/"+str(i).zfill(7)+'.jpg')[:, :, [2, 1, 0]] # BGR->RGB
+            """ Test if the input is right
+            # cv2.imshow('img',cv2.imread(image_dir+"/"+str(i).zfill(7)+'.jpg'))
+            # k = cv2.waitKey(0)
+            # if k ==27:
+            #     cv2.destroyAllWindows()
+            #     exit(0)
+            """
+            w,h,c = img.shape
+            ######
+            if w < 226 or h < 226:
+                d = 226.-min(w,h)
+                sc = 1+d/min(w,h)
+                img = cv2.resize(img,dsize=(0,0),fx=sc,fy=sc)
+            #######
+            img = (img/255.)*2 - 1
         
-        print(f">====== AVA {len(self.samples)} samples Loaded! ======<")
+            frames.append(img)
+
+        return np.asarray(frames, dtype=np.float32)
+
+
+    def load_flow_frames(self, image_dir, vid, start, num=64):
+        """ Load optical flow files from image_dir, crop and resize
+        !!! Suppose the optical flow files are cropped to 224 x 224 !!!
+        flow files in form of '0.pkl', starts from 0
+        """
+        frames = []
+        for i in range(start, start+num):
+            # TODO: change the path to the optical flow files
+            with open(image_dir+"/"+str(i)+".pkl", 'rb') as f:
+                of = pickle.load(f)
+    
+            c,w,h = of.shape
+        
+            imgx = of[0,:,:]
+            imgy = of[1,:,:] 
+            # TODO: the optical flow files need to be cropped and then resized
+            if w < 224 or h < 224:
+                d = 224.-min(w,h)
+                sc = 1+d/min(w,h)
+                imgx = cv2.resize(imgx,dsize=(0,0),fx=sc,fy=sc)
+                imgy = cv2.resize(imgy,dsize=(0,0),fx=sc,fy=sc)
+        
+            imgx = (imgx/255.)*2 - 1
+            imgy = (imgy/255.)*2 - 1
+            img = np.asarray([imgx, imgy]).transpose([1,2,0])
+
+            frames.append(img)
+    
+        return np.asarray(frames, dtype=np.float32)
 
 
     def __getitem__(self, index):
@@ -154,31 +170,55 @@ class ava_dataset(tud.Dataset):
                     from numpy.ndarray( T x H x W x C) to torch.FloatTensor ===== torch.from_numpy(pic.transpose([3,0,1,2]))
             labels: num_classes x num_frames
         """
-        vid, label, _, nf = self.samples[index]
-        start_f = random.randint(1, nf-self.seq_len-1)
+        vid, label, nf = self.dataset[index]
+        start_f = random.randint(0, nf-self.seq_len-1)
 
         if self.mode == 'rgb':
-            inputData = load_rgb_frames(self.root, vid, start_f, self.seq_len)
-        else:
-            inputData = load_flow_frames(self.root, vid, start_f, self.seq_len)
+            input_dir = f"{self.root}/streams/{vid[0]}_{vid[1]}_{vid[6]}_{vid[7]}/rgb"
+            inputData = self.load_rgb_frames(input_dir, vid, start_f)
+            gt = torch.from_numpy(label[:, start_f:start_f+self.seq_len])
+        elif self.mode == 'flow':
+            input_dir = f"{self.root}/streams/{vid[0]}_{vid[1]}_{vid[6]}_{vid[7]}/flow"
+            inputData = self.load_flow_frames(input_dir, vid, start_f)
+            gt = torch.from_numpy(label[:, start_f:start_f+self.seq_len])
+        elif self.mode == 'pose':
+            print('NOT NOW!')
+            exit(0)
+            inputData = self.load_pose_frames(vid, start_f)
+        elif self.mode == 'two':
+            # TODO: Flow images index Need to ALIGN with the other images
+            print('NOT NOW!')
+            exit(0)
+        elif self.mode == 'three':
+            # TODO: Flow images index Need to ALIGN with the other images
+            print('NOT NOW!')
+            exit(0)
         
-        ####### Data Augmentation
+        ####### Data Augmentation ######
         # # Not sure if should use here
         # inputData = self.transforms(inputData)
         #######
         inputData = torch.from_numpy(inputData.transpose([3,0,1,2]))
-        gt = torch.from_numpy(label[:, start_f:start_f+self.seq_len])
+        
 
         return inputData, gt
 
     def __len__(self):
         """ Return number of samples
         """
-        return len(self.samples)
+        return len(self.dataset)
 
 
 def main():
-    dataset = ava_dataset('/data/Dan/AVA/', 'train')
+    """ Test function for Dataloader
+    '''bash    'python -m datasets.AVA' at root path of the folder
+    """
+    dataset = ava_dataset()
+    dataloader = tud.DataLoader(dataset, batch_size=4, shuffle=True, num_workers=8, pin_memory=True)
+    for i, (inputs, labels) in enumerate(dataloader):
+        print(i)
+        print(inputs.shape, labels.shape)
+
     print("Well Done!")
 
 if __name__ == "__main__":
